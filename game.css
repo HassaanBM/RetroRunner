@@ -16,9 +16,13 @@
 /* ---------- 1. THEME VARIABLES (defaults = sunny day, city scene) ---------- */
 :root {
   /* Character */
-  --player-size: 86px;
-  --player-emoji: '🏃';            /* current pose (JS swaps run/jump) */
-  --player-image: none;            /* set when user uploads a PNG */
+  --player-size: 86px;             /* hitbox size — sprite frame overflows above it, see game.js */
+  --player-image: none;            /* set when user uploads a custom PNG */
+  --sprite-x: 0px;                 /* current sprite frame X offset — written every tick by game.js */
+  --sprite-y: 0px;                 /* current sprite frame Y offset — written every tick by game.js */
+  --sprite-bg-w: 0px;               /* scaled sprite sheet width — written by measureSpriteMetrics() */
+  --sprite-bg-h: 0px;               /* scaled sprite sheet height — written by measureSpriteMetrics() */
+  --sprite-frame-h: var(--player-size);  /* scaled single-frame height — written by measureSpriteMetrics() */
 
   /* Obstacle size tiers */
   --obstacle-size-sm: 52px;
@@ -26,6 +30,13 @@
   --obstacle-size-lg: 70px;
   --pickup-size: 42px;
   --gem-size: 38px;
+
+  /* Obstacles get their own filter (independent of --backdrop-filter
+     below) so they read clearly at speed regardless of what's behind
+     them: a touch darker + a bit more saturated so their color doesn't
+     wash out, plus a soft drop-shadow to separate their edges from
+     the sidewalk/sky. See .obstacle in §10. */
+  --obstacle-filter: brightness(0.8) saturate(1.1) drop-shadow(0 2px 3px rgba(0, 0, 0, 0.35));
 
   /* Sky bands */
   --sky-top: #8ed4f0;
@@ -36,21 +47,33 @@
   --ray-color: rgba(255, 213, 79, 0.55);
   --cloud-color: #ffffff;
 
+  /* Applied to #backdrop (sky/sun/clouds/hills/buildings — everything
+     purely decorative, see index.html) to quiet the whole background
+     down a notch so it stops competing with the character for
+     attention. Deliberately "slight" per the brief — nudge these if
+     you want more/less separation once the real art goes in. */
+  --backdrop-filter: brightness(0.92) saturate(0.8) contrast(0.97);
+
   /* World surfaces */
   --hill-color: #bfe3b4;
   --sidewalk-color: #e8e2d5;
   --sidewalk-line: #cfc8b8;
   --sidewalk-row: #ded7c6;
 
-  /* Building palette */
-  --bld-peach: #f9d5c9;
-  --bld-mint: #cde8d5;
-  --bld-butter: #f7e8b5;
-  --bld-lilac: #d3ddf5;
-  --bld-rose: #f2cfe3;
-  --bld-ice: #d9ecf2;
-  --bld-roof: #e57373;
-  --bld-window: rgba(80, 100, 140, 0.35);
+  /* Building palette — placeholder colors, nudged toward softer/more
+     muted pastels (lower saturation than the originals) so they sit
+     quietly in the background rather than competing with the
+     character. Expect to swap these for real art later — the
+     --backdrop-filter above will keep applying on top of whatever
+     replaces them. */
+  --bld-peach: #f0d9cf;
+  --bld-mint: #d2e6d9;
+  --bld-butter: #f0e6c2;
+  --bld-lilac: #dce2f2;
+  --bld-rose: #eed7e2;
+  --bld-ice: #dcebf0;
+  --bld-roof: #d99a94;              /* was a saturated red — softened so it stops clashing with the character's red cap */
+  --bld-window: rgba(80, 100, 140, 0.3);
 
   /* UI */
   --ui-text: #37474f;
@@ -58,6 +81,14 @@
   --ui-accent: #ff7043;
   --ui-card-bg: rgba(255, 255, 255, 0.94);
   --ui-card-border: #ff8a65;
+
+  /* "Danger" button treatment — currently only used by Restart (see
+     .p-btn--danger in §13), since it's the one button that discards
+     progress. Kept separate from --ui-accent so you can retheme
+     destructive actions independently of the rest of the UI. */
+  --danger-border: #e53935;
+  --danger-text: #c62828;
+  --danger-bg: #fff0ef;
 
   /* Layout */
   --ground-line: 78%;
@@ -146,6 +177,19 @@ html, body {
 }
 #world.zoom-in  { transform: scale(2.1); }    /* intro close-up on hero  */
 #world.zoom-mid { transform: scale(1.45); }   /* game-over push-in       */
+
+/* Every purely-decorative background layer (sky/sun/clouds/hills/
+   buildings — see index.html) lives inside #backdrop, so ONE filter
+   here dulls/darkens the whole scene for contrast against the
+   character, without touching the character, NPCs, obstacles, or
+   pickups (none of which are inside this wrapper). Tune
+   --backdrop-filter in :root — brightness/saturate/contrast are the
+   easiest knobs; a `blur()` is also an option if you want extra
+   depth-of-field separation later. */
+#backdrop {
+  position: absolute; inset: 0;
+  filter: var(--backdrop-filter);
+}
 
 /* ---------- 6. SKY, SUN & CLOUDS ---------- */
 .sky {
@@ -271,37 +315,124 @@ html, body {
   will-change: transform;
 }
 
-/* ---------- 9. CHARACTER (emoji poses OR custom PNG) ---------- */
+/* ---------- 9. CHARACTER (sprite sheet animations OR custom PNG) ---------- */
+/* ==========================================================================
+   SPRITE SHEET ANIMATION SYSTEM
+   ─────────────────────────────────────────────────────────────────────
+   Source asset:  res/sprite-sheet-game.png — the original
+   res/sprite-sheet.png upload (left untouched) with ONE change:
+   its solid background is chroma-keyed to transparent. The 6×2 grid
+   of cells is otherwise completely untouched — raw, evenly-spaced,
+   no recropping.
+
+   That's a deliberate choice, not an oversight. A tighter recrop
+   (bounding each frame to just its character silhouette, trimming
+   the dead margin) was tried and reverted: getting a crop box exactly
+   right on 12 differently-posed frames is fragile, and a slightly
+   too-tight box clips real pixels — a fingertip, the brim of the cap,
+   the tip of a shoe. The raw, untouched grid guarantees every
+   character comfortably fits inside its own cell with margin to
+   spare, so as long as the CSS always displays the FULL cell (see
+   `.player--sprite` below), nothing can ever be chopped. The
+   trade-off is some empty space above the character in most frames —
+   a far better trade than clipping.
+
+   Grid layout (measured directly from the PNG, do NOT guess these):
+     Sheet size : 1312 × 816 px
+     Grid       : 6 columns × 2 rows
+     Cell size  : 218.667 × 408 px
+     Row 0      : 6-frame RUN cycle (loops)
+     Row 1      : 6-stage JUMP sequence (crouch → launch → rise →
+                  apex → fall → land-crouch), driven by physics —
+                  NOT a fixed-duration animation, see game.js
+                  `pickJumpFrame()` / `renderSprite()`.
+
+   Frame selection is 100% JS-driven (background-position is written
+   every game tick in the 60 FPS main loop) rather than CSS @keyframes.
+   This is deliberate: a CSS keyframe animation has a FIXED duration,
+   but a jump's actual length varies (single vs. double jump), so a
+   timed CSS animation drifts out of sync with the physics. Driving
+   background-position straight from vy/py every frame keeps the pose
+   perfectly locked to what the character is actually doing, at a
+   silky 60 FPS since it rides the same requestAnimationFrame loop
+   that already drives movement.
+
+   Each character gets its own CSS hook class (.char-sunny / .char-maya
+   / .char-andre) so a specific character can later be swapped onto a
+   different sheet, given its own timing, or pushed through CSS
+   filters — right now they intentionally render identically.
+   ========================================================================== */
+
+/* `.character` is a permanent hook — always present on the player
+   element (see index.html), never added or removed by JS the way
+   `.player--sprite` / `.player--custom` / `.char-*` / `.player--blink`
+   are. Use it for any tweak you want applied to the hero no matter
+   what mode/character/state it's currently in, without needing to
+   know or touch the JS-managed classes below. It carries no rules of
+   its own on purpose — it's a pure hook. Combine it with the
+   game-state body classes in §13 to scope a tweak to one screen
+   only, e.g.:
+     body.game-intro .character { animation: gentle-idle-bob 2s ease-in-out infinite; } */
+.character {
+}
+
 .player {
   position: absolute;
   top: 0; left: 0;
   width: var(--player-size);
-  height: var(--player-size);
-  font-size: var(--player-size);
-  line-height: 1;
+  height: var(--player-size);    /* custom-PNG box size (see .player--sprite below) */
   z-index: 10;
-  will-change: transform;
+  will-change: transform, background-position;
   opacity: 1;
-}
-/* Default: emoji pose from --player-emoji (swapped by JS on jump/land) */
-.player::before {
-  content: var(--player-emoji);
-  display: block;
-}
-.player--jumping::before { transform: rotate(-8deg); }
-/* Custom PNG mode: the uploaded image replaces the emoji and stays STATIC —
-   no pose swap, no tilt. Styling is pure CSS; JS only sets the variable. */
-.player--custom::before {
-  content: '';
-  width: 100%; height: 100%;
-  background-image: var(--player-image);
-  background-size: contain;
   background-repeat: no-repeat;
-  background-position: center bottom;
-  transform: none !important;
+  /* --sprite-x/--sprite-y/--sprite-bg-w/--sprite-bg-h/--sprite-frame-h are
+     written by game.js (measureSpriteMetrics + renderSprite) so the sheet
+     always scales cleanly to whatever --player-size is set to. */
+  background-position: var(--sprite-x, 0) var(--sprite-y, 0);
 }
-/* Invincibility: HARD blink (never translucent) */
-.player--blink { animation: hard-blink 0.18s steps(1, end) infinite; }
+
+/* Sprite-sheet mode (default, non-custom characters)
+   IMPORTANT: a CSS background-image is always clipped to its own
+   element's box — `overflow: visible` does NOT let it paint outside,
+   that only applies to child content. Since the source art is taller
+   than the --player-size hitbox (portrait character frames), the
+   element itself is made exactly --sprite-frame-h tall so nothing
+   gets clipped. game.js then shifts the whole element UP by the
+   extra height so its BOTTOM (the feet) still lines up with the
+   ground the same way a plain --player-size box would — the hitbox
+   used for physics/collisions is untouched. */
+.player--sprite {
+  background-image: url('res/sprite-sheet-game.png');
+  background-size: var(--sprite-bg-w) var(--sprite-bg-h);
+  height: var(--sprite-frame-h);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   CHARACTER HOOK CLASSES
+   All three currently point at the same sheet/frames — flip any of
+   these to a different background-image, add a hue-rotate filter, or
+   give it its own frame timing later without touching game.js.
+   ───────────────────────────────────────────────────────────────────── */
+.player.char-sunny  { /* identical to base sheet for now */ }
+.player.char-maya   { /* identical to base sheet for now */ }
+.player.char-andre  { /* identical to base sheet for now */ }
+
+/* ─────────────────────────────────────────────────────────────────────
+   CUSTOM PNG MODE
+   When the user uploads a PNG it fully replaces the sprite sheet and
+   stays static — no frame cycling, no jump pose.
+   ───────────────────────────────────────────────────────────────────── */
+.player--custom {
+  background-image: var(--player-image) !important;
+  background-size: contain !important;
+  background-position: center bottom !important;
+}
+
+/* Invincibility: HARD blink (never translucent, interrupts animations) */
+.player--blink {
+  animation: hard-blink 0.18s steps(1, end) infinite !important;
+}
+
 @keyframes hard-blink {
   0%, 49%   { visibility: visible; }
   50%, 100% { visibility: hidden; }
@@ -316,6 +447,28 @@ html, body {
   will-change: transform;
 }
 
+/* Scoreboard opt-in name label — floats above the player while
+   state === 'playing' (see renderNameTag() in game.js, which also
+   toggles the [hidden] attribute). Horizontally centered on the
+   player's own transform via translateX(-50%) here, so game.js only
+   ever needs to supply the player's center-x / a y offset. */
+.player-name-tag {
+  position: absolute;
+  top: 0; left: 0;
+  transform: translateX(-50%);
+  z-index: 13;
+  padding: 2px 9px;
+  font-size: 12px;
+  font-weight: bold;
+  color: var(--ui-text);
+  background: var(--ui-card-bg);
+  border: 1.5px solid var(--ui-card-border);
+  border-radius: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+  will-change: transform;
+}
+
 /* ---------- 10. OBSTACLES & PICKUPS ---------- */
 .obstacle {
   position: absolute;
@@ -325,6 +478,10 @@ html, body {
   z-index: 8;
   will-change: transform;
   opacity: 1;
+  /* Darkened + edge-shadowed via --obstacle-filter (see :root) so
+     they're easy to pick out against the sidewalk/sky at high game
+     speed, regardless of what's directly behind them. */
+  filter: var(--obstacle-filter);
 }
 .obstacle--duck   { font-size: var(--obstacle-size-sm); }
 .obstacle--taco   { font-size: var(--obstacle-size-sm); }
@@ -407,6 +564,37 @@ html, body {
 .ctrl-btn:active { transform: scale(0.92); }
 
 /* ---------- 13. OVERLAYS, PICKERS & PAUSE PANEL ---------- */
+
+/* ─────────────────────────────────────────────────────────────────
+   GAME-STATE BODY CLASSES — one always-on styling hook per state.
+
+   game.js's setGameState() (see the STATE MACHINE block near the top
+   of game.js) is the ONLY place `state` ever changes, and every time
+   it does, it swaps these classes on <body> to match. Exactly one of
+   the four is present at any moment:
+
+     body.game-intro    the greeting / character-pick screen
+     body.game-playing  an active run
+     body.game-paused   the pause panel is open
+     body.game-over     the game-over screen
+
+   Centralizing it there (instead of toggling classes ad hoc from
+   every screen transition) is what guarantees these can never drift
+   out of sync with what's actually on screen — which is exactly the
+   bug that let the sprite keep animating during pause before.
+
+   All four are left empty on purpose — nothing changes visually
+   until you add rules under them. Example ideas:
+     body.game-paused #world      { filter: grayscale(0.4) brightness(0.85); }
+     body.game-paused .obstacle,
+     body.game-paused .pickup     { animation-play-state: paused; }
+     body.game-intro .sidewalk    { animation: none; }
+   ───────────────────────────────────────────────────────────────── */
+body.game-intro   { }
+body.game-playing { }
+body.game-paused  { }
+body.game-over    { }
+
 .overlay {
   position: absolute;
   left: 50%;
@@ -474,6 +662,60 @@ html, body {
   color: var(--ui-muted);
 }
 
+/* Scoreboard consent card — name input + Yes/No row (§ consentOverlay
+   in index.html). Deliberately plain, matching .p-btn's visual
+   language rather than introducing a new input style language. */
+#consentNameInput {
+  width: 100%;
+  margin-top: 4px;
+  padding: 9px 12px;
+  font-size: 15px;
+  font-family: inherit;
+  color: var(--ui-text);
+  background: #fff;
+  border: 2px solid var(--ui-card-border);
+  border-radius: 12px;
+  text-align: center;
+}
+#consentNameInput:focus { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
+.consent-actions { display: flex; justify-content: center; gap: 8px; margin-top: 6px; }
+
+/* End-of-run scoreboard table — up to 5 rows, name + score. Hidden
+   entirely (see [hidden] on #scoreboardSection) whenever nobody on
+   this browser has ever opted in. */
+.scoreboard {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 2px dashed var(--ui-card-border);
+}
+.scoreboard__rows { margin-top: 6px; }
+.scoreboard__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 14px;
+  color: var(--ui-text);
+  border-radius: 8px;
+}
+.scoreboard__row + .scoreboard__row { margin-top: 2px; }
+.scoreboard__rank { width: 18px; font-weight: bold; color: var(--ui-muted); }
+.scoreboard__name {
+  flex: 1;
+  text-align: left;
+  font-weight: bold;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scoreboard__score { font-weight: bold; color: var(--ui-accent); }
+/* The row just added by the run that ended is highlighted so it's
+   obvious at a glance where THIS run landed in the list. */
+.scoreboard__row--new {
+  background: #fff3ee;
+  box-shadow: 0 0 0 2px var(--ui-accent);
+}
+
 .pause-panel {
   position: absolute;
   left: 50%; top: 50%;
@@ -510,6 +752,16 @@ html, body {
   border-color: var(--ui-accent);
   background: #fff3ee;
   box-shadow: 0 0 0 2px var(--ui-accent);
+}
+/* Restart is destructive (discards the current run) — given a
+   visually distinct "danger" treatment so it can't be mistaken for
+   Resume under a quick tap in the pause panel. Uses its own
+   --danger-* variables (see :root) so it's easy to retheme without
+   touching --ui-accent, which every other button relies on. */
+.p-btn--danger {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+  background: var(--danger-bg);
 }
 .char-btn {
   font-size: 30px;

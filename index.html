@@ -21,18 +21,36 @@
 <div id="game">
   <!-- ===== World (zoomed by the cinematic camera) ===== -->
   <div id="world">
-    <div class="sky"></div>
-    <div class="sun"></div>
-    <div class="cloud" style="top:6%;  animation-duration:70s;"></div>
-    <div class="cloud" style="top:14%; animation-duration:95s;  animation-delay:-30s; scale:0.8;"></div>
-    <div class="cloud" style="top:22%; animation-duration:120s; animation-delay:-70s; scale:0.6;"></div>
-    <div class="hills"></div>
-    <div class="city"><div class="city-strip" id="cityStrip"></div></div>
+    <!-- #backdrop groups every purely-decorative background layer (sky,
+         sun, clouds, hills, buildings) so game.css can apply ONE filter
+         (--backdrop-filter) to dull/darken the whole scene for contrast
+         against the character, without also dulling the character, NPCs,
+         obstacles, or pickups — none of which live inside this wrapper. -->
+    <div id="backdrop">
+      <div class="sky"></div>
+      <div class="sun"></div>
+      <div class="cloud" style="top:6%;  animation-duration:70s;"></div>
+      <div class="cloud" style="top:14%; animation-duration:95s;  animation-delay:-30s; scale:0.8;"></div>
+      <div class="cloud" style="top:22%; animation-duration:120s; animation-delay:-70s; scale:0.6;"></div>
+      <div class="hills"></div>
+      <div class="city"><div class="city-strip" id="cityStrip"></div></div>
+    </div>
     <div id="npcLayer"></div>
     <div class="sidewalk" id="sidewalk"></div>
     <div id="entities">
       <div class="player-shadow" id="playerShadow"></div>
-      <div class="player" id="player"></div>
+      <!-- "character" is a permanent, always-on hook class — JS never
+           adds/removes it, unlike "player" which carries structural
+           CSS and the sprite/state classes JS toggles every frame.
+           Style anything you want to affect the hero regardless of
+           mode/state here (or scope it with the game-* body classes
+           in game.css §13 for state-specific tweaks). -->
+      <div class="player character" id="player"></div>
+      <!-- Floating name label for opted-in scoreboard players — only
+           shown while state === 'playing' (see renderNameTag() in
+           game.js). Hidden by default; nothing to see until someone
+           opts in. -->
+      <div class="player-name-tag" id="playerNameTag" hidden></div>
     </div>
   </div>
 
@@ -45,8 +63,31 @@
     <span class="hud__lives" id="hudLives">❤️❤️❤️</span>
   </div>
 
+  <!-- Scoreboard consent card — shown once on first visit, before the
+       intro card becomes usable (see game.js boot sequence). Reused
+       later from the pause panel to change opt-in status or name.
+       No option is pre-selected: the player must actively click
+       either button. Tapping the background does nothing while this
+       is open — see the consentPending guard in jump(). -->
+  <div class="overlay" id="consentOverlay" hidden>
+    <div class="overlay__title">🏆 Join the Scoreboard?</div>
+    <div class="overlay__text">
+      Add your name to the 5-most-recent scoreboard shown after each run?<br>
+      Saying yes stores a small cookie in this browser (just your name and
+      recent scores, kept on your device only) for up to 3 months.
+      This is completely optional.
+    </div>
+    <div class="interactive">
+      <input type="text" id="consentNameInput" maxlength="14" placeholder="Your name" autocomplete="off">
+    </div>
+    <div class="interactive consent-actions">
+      <button class="p-btn" id="consentDeclineBtn">✖ No thanks</button>
+      <button class="p-btn" id="consentAcceptBtn">✅ Save &amp; Play</button>
+    </div>
+  </div>
+
   <!-- Intro card: device-aware CTA + character picker + PNG upload -->
-  <div class="overlay" id="introOverlay">
+  <div class="overlay" id="introOverlay" hidden>
     <div class="overlay__title">🏃 DODGE THE CHAOS!</div>
     <div class="overlay__text">
       The city has gone bananas! Jump over the flying food<br>
@@ -55,7 +96,7 @@
     </div>
     <div class="overlay__label">Choose your runner</div>
     <div class="interactive" id="introCharRow"></div>
-    <div class="overlay__label">…or upload your own PNG (max 1 MB, stays static)</div>
+    <div class="overlay__label">…or upload your own PNG (max 10 MB, stays static)</div>
     <div class="interactive">
       <button class="p-btn" id="uploadBtn">📁 Upload PNG</button>
     </div>
@@ -72,10 +113,26 @@
         <div class="over-stat"><span class="over-stat__label">BEST</span><span id="overBest">00000</span></div>
       </div>
     </div>
-    <div class="overlay__cta" id="overCta">▶ Press SPACEBAR to retry</div>
+    <!-- Scoreboard: up to 5 most recent runs from players on THIS
+         browser who opted in — see game.js renderScoreboard(). Stays
+         hidden whenever the history is empty, e.g. nobody on this
+         device has ever opted in. Shown to every player regardless of
+         their own current opt-in choice, since it only ever lists
+         people who explicitly agreed to be listed. -->
+    <div class="scoreboard" id="scoreboardSection" hidden>
+      <div class="overlay__label">🏆 Recent Scoreboard</div>
+      <div class="scoreboard__rows" id="scoreboardRows"></div>
+    </div>
+    <!-- Restart is BUTTON-ONLY by design — tapping/pressing space
+         anywhere else on this screen no longer restarts, so a stray
+         tap can't accidentally wipe a score the player wanted to
+         admire first. See jump() in game.js. -->
+    <div class="interactive">
+      <button class="p-btn p-btn--wide" id="restartOverBtn">🔄 Play Again</button>
+    </div>
   </div>
 
-  <!-- Pause panel: resume / sound / character / time of day / scenery -->
+  <!-- Pause panel: resume / restart / sound / character / time of day / scenery -->
   <div class="pause-panel" id="pausePanel" hidden>
     <div class="pause-panel__title">⏸ Paused</div>
 
@@ -83,9 +140,28 @@
       <button class="p-btn p-btn--wide" id="resumeBtn">▶ Resume</button>
     </div>
 
+    <!-- Lets a player bail out and start a fresh run without having to
+         resume first. Styled as a "danger" action (p-btn--danger, see
+         game.css §13) since — unlike Resume — it discards the current
+         run; deliberately a separate button from Resume so the two
+         can't be mixed up under a quick tap. -->
+    <div class="pause-panel__row">
+      <button class="p-btn p-btn--wide p-btn--danger" id="restartBtn">🔄 Restart</button>
+    </div>
+
     <div class="pause-panel__row">
       <div class="pause-panel__label">Sound</div>
       <button class="p-btn" id="muteBtn">🔊 Sound on</button>
+    </div>
+
+    <!-- Reopens the same consent card used on first visit, pre-filled
+         with the current name if already opted in — so a player can
+         opt in/out or fix a typo anytime. Opening it hides this panel;
+         closing it (either button) returns to Paused rather than
+         auto-resuming, matching the button-only resume rule. -->
+    <div class="pause-panel__row">
+      <div class="pause-panel__label">Scoreboard</div>
+      <button class="p-btn" id="scoreboardSettingsBtn">🏆 Join the scoreboard</button>
     </div>
 
     <div class="pause-panel__row">
